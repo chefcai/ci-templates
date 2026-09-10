@@ -1,0 +1,38 @@
+# Thin wrapper for a Go repo that ships a container AND a web UI (a11y).
+# This is the shape chefcai/anya-qr's ci.yml migrated to.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    permissions:
+      contents: read
+      pull-requests: write
+      packages: write
+    uses: chefcai/ci-templates/.github/workflows/standard-ci.yml@main
+    with:
+      language: go
+      go-version-file: go.mod
+      has-dockerfile: true
+      platforms: linux/amd64,linux/arm64
+      trivy-skip-dirs: ""            # comma-separated accepted-risk exceptions, see README
+      gosec-blocking: false          # graduate to true once findings are triaged
+      gitleaks-blocking: false       # graduate to true once a clean baseline is confirmed
+      trivy-fs-blocking: false       # graduate to true once clean
+      trivy-image-blocking: false    # graduate to true once clean
+      a11y: true                     # manual opt-in - only for web-facing repos
+      a11y-build-cmd: "go build -o app ./cmd/app"
+      a11y-start-cmd: "PORT=8090 ./app &"
+      a11y-healthcheck-url: "http://127.0.0.1:8090/healthz"
+      a11y-seed-cmd: ""
+      a11y-install-cmd: "npm ci --prefix tools/a11y"
+      a11y-scan-cmd: "node tools/a11y/scan.js"
+      a11y-base-url-env: "A11Y_BASE_URL"
+      a11y-base-url: "http://127.0.0.1:8090"
+      a11y-blocking: false           # graduate to true once the findings backlog is fixed

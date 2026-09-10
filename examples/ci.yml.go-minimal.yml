@@ -1,0 +1,21 @@
+# Thin wrapper for a Go repo with no Dockerfile and no web UI.
+# Copy to .github/workflows/ci.yml in the consuming repo (bootstrap.sh does
+# this for you).
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: chefcai/ci-templates/.github/workflows/standard-ci.yml@main
+    with:
+      language: go
+      go-version-file: go.mod
