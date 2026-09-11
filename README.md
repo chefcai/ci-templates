@@ -1,70 +1,152 @@
 # ci-templates
 
-A reusable GitHub Actions CI pipeline (`test` / `security` / optional `a11y`
-/ optional `docker`) that every repo under `chefcai` can adopt as a thin
-wrapper, instead of rebuilding scanning and toolchain configuration by hand
-each time. Everything here uses free tooling only.
+Reusable GitHub Actions CI layers that every repo under `chefcai` can
+compose into its own thin `ci.yml`, instead of rebuilding scanning and
+toolchain configuration by hand each time. Everything here uses free
+tooling only.
 
 Extracted from `chefcai/anya-qr`'s original inline `ci.yml`, which is the
-proven reference implementation this generalizes. Currently **Go-only** —
-see [6. Adding a new language](#6-adding-a-new-language) before onboarding a
-non-Go repo.
+proven reference implementation this generalizes.
 
-## 0. Adopting this in a new repo (under 10 minutes)
+## Architecture: layers, not one workflow
 
-From the root of the target repo:
+Each concern is its own reusable workflow file. A consuming repo's `ci.yml`
+is a list of jobs, each `uses:`-ing whichever layers apply to it — not one
+job calling one workflow with a `language` input.
 
-```sh
-curl -sSL https://raw.githubusercontent.com/chefcai/ci-templates/main/scripts/new-repo-init.sh -o /tmp/new-repo-init.sh
-chmod +x /tmp/new-repo-init.sh
-/tmp/new-repo-init.sh --language go [--dockerfile] [--a11y]
+```
+.github/workflows/baseline.yml        always: gitleaks + Trivy fs/config. No language input, ever.
+.github/workflows/docker.yml          conditional: build -> scan -> push. No language input.
+.github/workflows/a11y.yml            opt-in: pa11y/Puppeteer. Caller supplies commands, not this file.
+.github/workflows/go.yml              language layer: test (vet+race) + security (govulncheck+gosec)
+.github/workflows/terraform.yml       language layer: fmt/validate + checkov
+.github/workflows/php.yml             language layer: phpunit + composer audit + psalm
+.github/workflows/kotlin.yml          language layer: gradle test/build + detekt
+.github/workflows/bash.yml            language layer: shellcheck (+ optional test-cmd)
+.github/workflows/cloudformation.yml  language layer: cfn-lint
 ```
 
-This drops in:
-- `.github/dependabot.yml` — can't be centralized, must live in each repo
-- `.github/workflows/ci.yml` — a thin wrapper that calls this repo's
-  `standard-ci.yml` via `workflow_call`
+A Dockerfile-only repo (nothing but a Dockerfile, no application source)
+needs **no language layer at all** — `baseline.yml` + `docker.yml` already
+cover everything there is to scan.
 
-If you passed `--a11y`, fill in the `TODO` a11y-`*`-cmd values it left in
-`ci.yml` (see `examples/ci.yml.go-full.yml` for a worked example from
-`anya-qr`). Commit, push, done.
+Why split it this way rather than one file with more `language ==` branches:
+a change to the Python layer (once it exists) cannot break the Go layer,
+because they're not the same file and share no conditional logic. Each
+layer is independently readable — `baseline.yml` has zero language noise in
+it and never will.
 
-## 1. Stages
+Cross-layer *values* (not just pass/fail gating, an actual output one layer
+hands to another) aren't solved by this split automatically — see
+[#6](https://github.com/chefcai/ci-templates/issues/6) if a layer ever needs
+to pass a value to another rather than just gating on `needs:`.
 
-### `test`
+## 0. Adopting this in a new repo
 
-Native vet/lint + native test runner in strict/race mode, gating everything
-except `security` (which runs in parallel for speed, matching `anya-qr`).
+A consuming repo's `ci.yml` composes the layers it needs. Example for a Go
+repo with a Dockerfile and a web UI (this is `anya-qr`'s shape):
 
-| Language | vet/lint | test |
-|---|---|---|
-| Go | `go vet ./...` | `go test -race ./...` |
+```yaml
+name: ci
+on:
+  push: { branches: [main], tags: ["v*"] }
+  pull_request: { branches: [main] }
 
-An optional `build-cmd` input runs an extra build-verification step if the
-repo needs one beyond what `security`/`a11y`/`docker` already exercise.
+jobs:
+  baseline:
+    permissions: { contents: read, pull-requests: write }
+    uses: chefcai/ci-templates/.github/workflows/baseline.yml@main
+    with:
+      trivy-skip-dirs: tools/a11y
 
-### 2. `security`
+  go:
+    uses: chefcai/ci-templates/.github/workflows/go.yml@main
+    with:
+      go-version-file: go.mod
+
+  docker:
+    needs: [baseline, go]
+    permissions: { contents: read, packages: write }
+    uses: chefcai/ci-templates/.github/workflows/docker.yml@main
+    with:
+      platforms: linux/amd64,linux/arm64
+
+  a11y:
+    needs: [go]
+    uses: chefcai/ci-templates/.github/workflows/a11y.yml@main
+    with:
+      language: go
+      a11y-build-cmd: "go build -o app ./cmd/app"
+      a11y-start-cmd: "PORT=8090 ./app &"
+      a11y-healthcheck-url: "http://127.0.0.1:8090/healthz"
+      a11y-base-url: "http://127.0.0.1:8090"
+```
+
+A Dockerfile-only repo's whole `ci.yml` is just the `baseline` and `docker`
+jobs above — no language job at all.
+
+`scripts/new-repo-init.sh` generates the `dependabot.yml` half of adoption
+(can't be centralized — Dependabot config must live in each repo); it does
+not yet generate the `ci.yml` job list above, since which layers apply is a
+per-repo judgment call (see the script's own `--help`).
+
+## 1. `baseline.yml` — always on, no language input
 
 | Tool | Purpose | Blocking? | Gotcha encoded here |
 |---|---|---|---|
-| `govulncheck` | known-vuln scan of stdlib + deps | always | installed and run manually — **never** `golang/govulncheck-action`, whose internal `setup-go` silently overrides the pinned Go version and can mask real findings; the step also pins `GOTOOLCHAIN: auto` itself rather than trusting `actions/setup-go`'s current default |
-| `gosec` | Go SAST | input `gosec-blocking` (default report-only) | — |
 | `gitleaks` | secret scanning | input `gitleaks-blocking` (default report-only) | job carries `pull-requests: write` — without it, `gitleaks-action` 403s listing PR commits and, under `continue-on-error`, looks like a pass |
-| Trivy `fs` | dependency + Dockerfile/IaC config scan | input `trivy-fs-blocking` (default report-only) | `scanners: vuln,config` set explicitly — the fs default is vuln-only and silently skips Dockerfile checks otherwise |
-| Trivy `image` (if `has-dockerfile`) | vulnerabilities baked into the built image | input `trivy-image-blocking` (default report-only) | scans the image just built in the same job (`load: true, push: false`), before any push |
-| Dependabot | automated dependency PRs | N/A | one entry per ecosystem, always including `github-actions` |
+| Trivy `fs` | dependency + Dockerfile/Terraform/CloudFormation config scan | input `trivy-fs-blocking` (default report-only) | `scanners: vuln,config` set explicitly — the fs default is vuln-only and silently skips misconfiguration checks otherwise |
 
-### 3. `a11y` (manual opt-in, web-facing repos only)
+This file will never gain a `language` input. If a change to it ever seems
+to need one, that change belongs in a language layer instead.
 
-`pa11y` + Puppeteer against a locally built-and-seeded instance of the app —
-not a static file. Both light and dark mode are covered by having your scan
-command call Puppeteer's `page.emulateMediaFeatures()` before handing the
-page to pa11y, rather than running the scanner twice. `anya-qr`'s
+## 2. Language layers — `test` + language-specific `security`
+
+Each layer runs its own `test` job (build/vet/test — inherently
+language-specific, no way around this) and, where the language has one, a
+`security` job for tools that are genuinely language-specific. Anything
+`baseline.yml` already covers (secrets, dependency/config scanning) is
+never duplicated in a language layer.
+
+| Language | Status | `test` | Language-specific `security` |
+|---|---|---|---|
+| Go | proven (`anya-qr`) | `go vet` + `go test -race` | `govulncheck` (always blocking — call-graph aware, installed manually, never `golang/govulncheck-action`, see gotcha below) + `gosec` (input-gated blocking) |
+| Terraform | written ahead of need, unvalidated | `terraform fmt -check` + `terraform validate` | `checkov` (input-gated blocking) — Trivy `config` in baseline already covers most misconfiguration, checkov is the deeper policy layer |
+| PHP | written for `anamanta-kythings`, unvalidated | caller-supplied `test-cmd` (default `composer test`) | `composer audit` (known-vuln, free, built into Composer) + `psalm --taint-analysis` (SAST, built into Psalm, no separate plugin needed) |
+| Kotlin/JVM | written for `launcher`, unvalidated | `./gradlew test` + `./gradlew build` (Android SDK setup is opt-in via `is-android`) | `detekt` covers both lint and SAST — no second tool needed the way Go needs gosec alongside `go vet` |
+| Bash | written ahead of need, unvalidated | `shellcheck` (ships preinstalled on GitHub-hosted runners) + optional caller `test-cmd` | none — no known-vuln-scanner equivalent exists for shell scripts; `baseline.yml`'s gitleaks/Trivy already cover secrets and any embedded Dockerfile |
+| CloudFormation | written ahead of need, unvalidated | `cfn-lint` against a caller-supplied `template-glob` (**required**, no safe default — verified `cfn-lint` errors on any yaml/json without a `Resources` key, so it can't scan "everything" the way Trivy can) | none — Trivy `config` in baseline already covers CloudFormation misconfiguration |
+| Dockerfile-only (no app source) | proven pattern, no file needed | n/a | n/a — `baseline.yml` + `docker.yml` alone are the whole pipeline |
+
+**Known gotcha every language layer must respect:** `actions/setup-go@v7`
+(and presumably future major bumps of other language setup actions)
+changed toolchain-resolution defaults in a way that broke a live `go
+install` step mid-pipeline. Any step that installs a tool at runtime
+(`go install ...@latest`, `pip install ...`, `composer require --dev ...`,
+etc.) should pin its own toolchain-resolution behavior explicitly rather
+than trusting the setup action's current default — `go.yml`'s
+`govulncheck` step does this with `GOTOOLCHAIN: auto`.
+
+**"Unvalidated" means literally that**: these files were written from the
+role each tool should fill and, where verifiable, checked against the real
+tool's actual behavior (e.g. `cfn-lint`'s Resources-key requirement was
+confirmed by running it, not assumed) — but none has run against the real
+repo it was written for yet. Treat every unvalidated layer as a draft to
+fix once it actually runs, not a finished implementation.
+
+## 3. `a11y.yml` — opt-in, web-facing repos only
+
+`pa11y` + Puppeteer against a locally built-and-seeded instance of the app
+— not a static file. Both light and dark mode are covered by having your
+scan command call Puppeteer's `page.emulateMediaFeatures()` before handing
+the page to pa11y, rather than running the scanner twice. `anya-qr`'s
 `tools/a11y/scan.js` is the reference implementation of that pattern.
 
-Wire it up with these inputs (all just shell commands/URLs — the reusable
-workflow doesn't know or care what your app is):
+Wire it up with these inputs (all just shell commands/URLs — the layer
+doesn't know or care what your app is, except for one toolchain-setup step
+that still needs to know what to install):
 
+- `language` — which toolchain to install before building (only `go` today)
 - `a11y-build-cmd` — builds the app under test
 - `a11y-start-cmd` — starts it in the background (must return immediately,
   end it with `&`)
@@ -79,7 +161,7 @@ workflow doesn't know or care what your app is):
 `a11y-blocking` (default `false`) graduates it once the initial findings
 backlog is fixed.
 
-### 4. `docker` (conditional, `has-dockerfile: true`)
+## 4. `docker.yml` — conditional, no language input
 
 Never pushes an unscanned image:
 
@@ -97,7 +179,7 @@ For a Go image, cross-compile via `FROM --platform=$BUILDPLATFORM ... ARG
 TARGETOS TARGETARCH` in the Dockerfile instead of relying on QEMU emulation
 — meaningfully faster since only the final `COPY`-only stage varies by
 platform. See `anya-qr`'s `Dockerfile` for the pattern; this isn't something
-the workflow itself can enforce, it's a Dockerfile-authoring convention.
+`docker.yml` itself can enforce, it's a Dockerfile-authoring convention.
 
 ## 5. Report-only → blocking graduation process
 
@@ -112,51 +194,52 @@ To graduate a scanner to blocking:
    any you're not going to fix (see "Accepting a finding" below).
 2. Flip its `*-blocking` input to `true` in the consuming repo's `ci.yml`.
 3. Track the graduation as its own commit/PR so there's a record of when
-   and why (see `anya-qr` PR history, e.g. "Blocking as of #13" comments).
+   and why (see `anya-qr` PR history, e.g. "Blocking as of #13" comments,
+   and issue #40/#43 for a real gosec triage-then-graduate example).
 
 ### Accepting a finding
 
-Use Trivy's `trivy-skip-dirs` input to exclude a path with a **documented**,
-no-fix-available finding — never to silently suppress something. `anya-qr`
-excludes `tools/a11y` (a CI-only scanner dependency, not shipped in the app
-or its image) for two HIGH CVEs in a transitive `extract-zip` dependency
-with no upstream fix, tracked in that repo's issues #25/#27. Comment the
-`ci.yml` input with the same rationale + issue link whenever you do this.
+Use Trivy's `trivy-skip-dirs` input (on `baseline.yml`) to exclude a path
+with a **documented**, no-fix-available finding — never to silently
+suppress something. `anya-qr` excludes `tools/a11y` (a CI-only scanner
+dependency, not shipped in the app or its image) for two HIGH CVEs in a
+transitive `extract-zip` dependency with no upstream fix, tracked in that
+repo's issues #25/#27. Comment the `ci.yml` input with the same rationale +
+issue link whenever you do this. `gosec`'s `#nosec` comments (see
+`anya-qr`#43) are the equivalent pattern for a single line rather than a
+whole path.
 
 ## 6. Adding a new language
 
-Go is the only proven implementation. To add another language:
-
-1. Add a branch to each Go-specific step in `.github/workflows/
-   standard-ci.yml` guarded by `inputs.language == '<lang>'` (the `test` and
-   `security` jobs' top-level `if` will need to become an `||` of every
-   supported language, and `unsupported-language`'s `if` the inverse).
-2. Substitute the same *role*, not the same tool:
-
-   | Role | Go (proven) | Node/TypeScript | Python |
-   |---|---|---|---|
-   | Known-vuln scan | `govulncheck` | `npm audit` / `osv-scanner` | `pip-audit` |
-   | SAST | `gosec` | `eslint` security plugin set / `semgrep` (free tier) | `bandit` |
-   | Secret scan | `gitleaks` | `gitleaks` (unchanged) | `gitleaks` (unchanged) |
-   | Dependency/config scan | Trivy `fs` | Trivy `fs` (unchanged) | Trivy `fs` (unchanged) |
-   | Dependabot ecosystem | `gomod` | `npm` | `pip` |
-
-   Trivy and gitleaks are already language-agnostic — don't touch those
-   branches. Only the known-vuln scanner and SAST tool need a real
-   per-language step.
-3. Onboard exactly one real repo in that language before generalizing
-   further — don't invent config for a language nothing here actually
-   exercises yet. This table is meant to grow one proven row at a time.
-4. Update `scripts/new-repo-init.sh`'s ecosystem-name `case` if the new
-   language's Dependabot ecosystem name differs from its `--language` flag
-   value.
+1. Add a new `.github/workflows/<language>.yml` reusable workflow with its
+   own `test` job and, if the language has genuinely language-specific
+   security tooling, its own `security` job. Do not touch `baseline.yml`,
+   `docker.yml`, or `a11y.yml` — none of them take a `language` input and
+   none of them should.
+2. Substitute the same *role*, not the same tool, and check what
+   `baseline.yml`'s Trivy `fs` scan already covers before reaching for a
+   new tool — it reads lockfiles across several ecosystems already, so
+   known-vuln scanning in particular may need nothing new.
+3. Onboard exactly one real repo before trusting the layer — every
+   language layer in this repo that predates a real repo running it is
+   marked "unvalidated" in the table above; flip that once it's proven.
+4. If the language needs a Dependabot ecosystem entry, add it to
+   `scripts/new-repo-init.sh`'s ecosystem-name mapping.
 
 ## Repository layout
 
 ```
-.github/workflows/standard-ci.yml   the reusable workflow (workflow_call)
-examples/ci.yml.go-minimal.yml      thin wrapper: go, no docker, no a11y
-examples/ci.yml.go-full.yml         thin wrapper: go + docker + a11y (anya-qr's shape)
-examples/dependabot.yml.go-docker   dependabot.yml with gomod + docker + github-actions
-scripts/new-repo-init.sh            bootstrap script, see section 0
+.github/workflows/baseline.yml        gitleaks + Trivy fs/config (always, no language input)
+.github/workflows/docker.yml          docker-setup/docker-scan/docker-push (conditional, no language input)
+.github/workflows/a11y.yml            pa11y/Puppeteer (opt-in)
+.github/workflows/go.yml              Go language layer
+.github/workflows/terraform.yml       Terraform language layer (unvalidated)
+.github/workflows/php.yml             PHP language layer (unvalidated)
+.github/workflows/kotlin.yml          Kotlin/JVM language layer (unvalidated)
+.github/workflows/bash.yml            Bash language layer (unvalidated)
+.github/workflows/cloudformation.yml  CloudFormation language layer (unvalidated)
+examples/ci.yml.go-minimal.yml        thin wrapper: go, no docker, no a11y
+examples/ci.yml.go-full.yml           thin wrapper: go + docker + a11y (anya-qr's shape)
+examples/dependabot.yml.go-docker     dependabot.yml with gomod + docker + github-actions
+scripts/new-repo-init.sh              bootstrap script for dependabot.yml
 ```

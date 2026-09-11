@@ -1,0 +1,43 @@
+name: CloudFormation (reusable)
+
+# Lint/validate only. Known-vuln/misconfig scanning is NOT duplicated here
+# - baseline.yml's Trivy `config` scan already covers CloudFormation
+# misconfiguration, the same scanner that already covers Dockerfile and
+# Terraform checks.
+#
+# Written ahead of need - no repo in this account is primarily
+# CloudFormation today. Verified directly (not assumed): cfn-lint does
+# NOT skip files that aren't CloudFormation templates - it errors loudly
+# on any yaml/json lacking a `Resources` key (tried it against a GitHub
+# Actions workflow file and a package.json, both failed with E1001). So
+# this can't safely default to "every yaml/json in the repo" the way
+# baseline.yml's Trivy scan can - it needs an explicit glob matching only
+# real templates, which means a naming convention every consuming repo
+# has to actually follow.
+
+on:
+  workflow_call:
+    inputs:
+      template-glob:
+        description: "Glob (relative to repo root, bash extglob) matching only real CloudFormation template files. There is no safe repo-wide default - cfn-lint errors on any yaml/json without a Resources key, so this must be set to whatever naming convention the consuming repo actually uses (e.g. `cloudformation/*.yaml`, `**/*.template.json`)."
+        type: string
+        required: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - run: pip install cfn-lint
+      - name: cfn-lint
+        run: |
+          shopt -s globstar nullglob
+          files=(${{ inputs.template-glob }})
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no files matched template-glob '${{ inputs.template-glob }}' - cfn-lint has nothing to check"
+            exit 1
+          fi
+          cfn-lint "${files[@]}"

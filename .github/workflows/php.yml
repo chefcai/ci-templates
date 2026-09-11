@@ -1,0 +1,57 @@
+name: PHP (reusable)
+
+# Deliberately thin: `composer audit` already covers known-vuln scanning
+# with no separate tool needed (unlike Go's govulncheck), and Psalm's
+# built-in --taint-analysis covers SAST without a separate plugin package.
+#
+# Written for chefcai/anamanta-kythings (chefcai/ci-templates#2) - that
+# repo is a fork of an upstream project, so composer audit/psalm will also
+# surface findings in vendored/upstream code chefcai didn't write. Worth
+# scoping paths or accepting upstream-only findings explicitly once this
+# actually runs against it, rather than guessing the right scope here
+# ahead of time. Unvalidated against a real run - revisit once it is.
+
+on:
+  workflow_call:
+    inputs:
+      php-version:
+        type: string
+        default: "8.3"
+      test-cmd:
+        description: "Command that runs the test suite, e.g. `composer test` or `vendor/bin/phpunit`."
+        type: string
+        default: "composer test"
+      composer-audit-blocking:
+        type: boolean
+        default: false
+      psalm-blocking:
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ inputs.php-version }}
+      - run: composer install --no-progress --prefer-dist
+      - run: ${{ inputs.test-cmd }}
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ inputs.php-version }}
+      - run: composer install --no-progress --prefer-dist
+      - name: composer audit
+        run: composer audit
+        continue-on-error: ${{ !inputs.composer-audit-blocking }}
+      - name: psalm (taint analysis)
+        run: |
+          composer require --dev vimeo/psalm --no-progress
+          vendor/bin/psalm --taint-analysis --no-cache
+        continue-on-error: ${{ !inputs.psalm-blocking }}

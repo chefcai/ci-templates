@@ -1,0 +1,66 @@
+name: Kotlin/JVM (reusable)
+
+# Gradle-based Kotlin/Java. Written for chefcai/launcher (chefcai/ci-templates#3),
+# which is an Android app - `build-cmd` defaults to a plain `./gradlew
+# build` but an Android repo will need to override it (e.g.
+# `./gradlew assembleDebug`) and needs the Android SDK on the runner,
+# which is why `setup-android` is conditional rather than assumed.
+#
+# detekt covers both lint and SAST here (no separate SAST tool) - it has
+# its own rule categories for both, so this doesn't need a second tool the
+# way Go needed gosec alongside go vet. Known-vuln scanning relies on
+# Trivy fs in baseline.yml reading the Gradle lockfile - Android projects
+# often don't commit one by default, so that only works once
+# `./gradlew dependencies --write-locks` output is checked in; until then
+# there's effectively no known-vuln coverage for this repo shape, which is
+# worth flagging rather than silently assuming Trivy already handles it.
+#
+# Unvalidated against a real run - revisit once it is.
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        type: string
+        default: "21"
+      is-android:
+        description: "Whether to install the Android SDK before building (needed for an Android app; skip for a plain JVM/Kotlin library)."
+        type: boolean
+        default: false
+      build-cmd:
+        description: "Command that builds the project, e.g. `./gradlew build` or `./gradlew assembleDebug`."
+        type: string
+        default: "./gradlew build"
+      test-cmd:
+        description: "Command that runs the test suite."
+        type: string
+        default: "./gradlew test"
+      detekt-blocking:
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+      - if: ${{ inputs.is-android }}
+        uses: android-actions/setup-android@v4
+      - run: ${{ inputs.test-cmd }}
+      - run: ${{ inputs.build-cmd }}
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+      - name: detekt
+        run: ./gradlew detekt
+        continue-on-error: ${{ !inputs.detekt-blocking }}

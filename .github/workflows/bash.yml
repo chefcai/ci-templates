@@ -1,0 +1,38 @@
+name: Bash (reusable)
+
+# Lint-only: shellcheck catches most of what would matter here (unquoted
+# expansion, unsafe eval, etc.), and there's no real equivalent of a
+# known-vuln scanner for shell scripts - baseline.yml's gitleaks/Trivy
+# already cover secrets and any embedded Dockerfile/config.
+#
+# Written ahead of need - no repo in this account is primarily Bash today.
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: "Root directory to search for *.sh files."
+        type: string
+        default: "."
+      test-cmd:
+        description: "Optional test command (e.g. a bats suite: `bats test/`). Leave empty to skip - most shell-script repos have no test runner."
+        type: string
+        default: ""
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # shellcheck ships preinstalled on GitHub-hosted ubuntu-latest runners.
+      - name: shellcheck
+        run: |
+          mapfile -d '' files < <(find "${{ inputs.path }}" -type f -name '*.sh' -print0)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no .sh files found under ${{ inputs.path }}"
+            exit 0
+          fi
+          shellcheck "${files[@]}"
+      - name: Run tests
+        if: ${{ inputs.test-cmd != '' }}
+        run: ${{ inputs.test-cmd }}

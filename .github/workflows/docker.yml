@@ -1,0 +1,120 @@
+name: Docker build/scan/push (reusable)
+
+# Language-agnostic: builds whatever Dockerfile is at the repo root, scans
+# it with Trivy before ever pushing, same as the security-relevant part of
+# the original monolithic standard-ci.yml. No `language` input - this file
+# doesn't need to know what's inside the image.
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: "Fully-qualified image name to build/push. Defaults to ghcr.io/<owner>/<repo>."
+        type: string
+        default: ""
+      platforms:
+        description: "Comma-separated docker platforms to build, scan (each separately), and push (combined)."
+        type: string
+        default: "linux/amd64,linux/arm64"
+      trivy-image-blocking:
+        description: "Graduate the Trivy image scan from report-only to blocking."
+        type: boolean
+        default: false
+
+jobs:
+  docker-setup:
+    runs-on: ubuntu-latest
+    outputs:
+      platforms-json: ${{ steps.split.outputs.json }}
+      image: ${{ steps.image.outputs.value }}
+    steps:
+      - id: split
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+        run: echo "json=$(jq -Rc 'split(",")' <<< "$PLATFORMS")" >> "$GITHUB_OUTPUT"
+      - id: image
+        run: |
+          if [ -n "${{ inputs.image-name }}" ]; then
+            echo "value=${{ inputs.image-name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=ghcr.io/${{ github.repository }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  docker-scan:
+    needs: [docker-setup]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: ${{ fromJSON(needs.docker-setup.outputs.platforms-json) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ needs.docker-setup.outputs.image }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+      # buildx --load cannot load a multi-platform manifest as one local
+      # image, so each target platform is built and scanned separately;
+      # docker-push below does one final combined-platform push build.
+      - name: Build image for ${{ matrix.platform }} (local only, not pushed)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: VERSION=${{ github.ref_name }}-${{ github.sha }}
+          cache-from: type=gha,scope=docker-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.platform }}
+      - name: Trivy image scan (${{ matrix.platform }}, before push)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+          severity: CRITICAL,HIGH
+          exit-code: ${{ inputs.trivy-image-blocking && '1' || '0' }}
+
+  docker-push:
+    if: ${{ github.event_name != 'pull_request' }}
+    needs: [docker-setup, docker-scan]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ needs.docker-setup.outputs.image }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+      - name: Push combined multi-platform image (never push unscanned - docker-scan already gated this)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ inputs.platforms }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: VERSION=${{ github.ref_name }}-${{ github.sha }}
+      - name: Report image size
+        run: |
+          IMAGE="${{ needs.docker-setup.outputs.image }}"
+          IMAGE="${IMAGE,,}"
+          docker pull "$IMAGE:sha-$(git rev-parse --short HEAD)" >/dev/null
+          docker image ls "$IMAGE" --format '{{.Repository}}:{{.Tag}} {{.Size}}'

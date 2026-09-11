@@ -1,0 +1,88 @@
+name: Accessibility scan (reusable, opt-in)
+
+# pa11y + Puppeteer against a locally built-and-seeded instance of the app.
+# Every step is a caller-supplied command/URL, so this file itself has no
+# opinion about what the app is - the one exception is the toolchain setup
+# step, which still needs to know what to install to build the app at all.
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: "Language toolchain to install before building the app under test. Only 'go' is implemented today."
+        type: string
+        default: "go"
+      go-version-file:
+        description: "Path to go.mod used to pin the Go toolchain (language: go only)."
+        type: string
+        default: "go.mod"
+      a11y-build-cmd:
+        description: "Command that builds the server/app under test."
+        type: string
+        default: ""
+      a11y-start-cmd:
+        description: "Command that starts the built app in the background. Must return immediately (end it with `&`)."
+        type: string
+        default: ""
+      a11y-healthcheck-url:
+        description: "URL polled until it returns 2xx before scanning."
+        type: string
+        default: ""
+      a11y-seed-cmd:
+        description: "Optional command to seed data into the running app before scanning."
+        type: string
+        default: ""
+      a11y-install-cmd:
+        description: "Command that installs the pa11y/Puppeteer scanner's own dependencies."
+        type: string
+        default: "npm ci --prefix tools/a11y"
+      a11y-scan-cmd:
+        description: "Command that runs the light+dark pa11y scan."
+        type: string
+        default: "node tools/a11y/scan.js"
+      a11y-base-url-env:
+        description: "Env var name the scan command reads the running app's base URL from."
+        type: string
+        default: "A11Y_BASE_URL"
+      a11y-base-url:
+        description: "Value to export under a11y-base-url-env before running the scan."
+        type: string
+        default: ""
+      a11y-blocking:
+        description: "Graduate the a11y scan from report-only to blocking."
+        type: boolean
+        default: false
+
+jobs:
+  a11y:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up language toolchain
+        if: ${{ inputs.language == 'go' }}
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+      - name: Build app under test
+        if: ${{ inputs.a11y-build-cmd != '' }}
+        run: ${{ inputs.a11y-build-cmd }}
+      - name: Start app under test
+        run: ${{ inputs.a11y-start-cmd }}
+      - name: Wait for health check
+        if: ${{ inputs.a11y-healthcheck-url != '' }}
+        run: |
+          for i in $(seq 1 20); do curl -sf "${{ inputs.a11y-healthcheck-url }}" && break; sleep 0.5; done
+      - name: Seed test data
+        if: ${{ inputs.a11y-seed-cmd != '' }}
+        run: ${{ inputs.a11y-seed-cmd }}
+      - name: Install a11y scanner deps
+        run: ${{ inputs.a11y-install-cmd }}
+      # Scans both light and dark rendering. The scan command is expected
+      # to toggle prefers-color-scheme itself via Puppeteer's
+      # page.emulateMediaFeatures() rather than running as two separate
+      # tool invocations - see README '3. a11y'.
+      - name: Run a11y scan (light + dark)
+        run: |
+          export "${{ inputs.a11y-base-url-env }}=${{ inputs.a11y-base-url }}"
+          ${{ inputs.a11y-scan-cmd }}
+        continue-on-error: ${{ !inputs.a11y-blocking }}

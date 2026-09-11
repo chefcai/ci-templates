@@ -1,0 +1,69 @@
+name: Go (reusable)
+
+# Everything genuinely Go-specific: build/vet/test, and the two
+# language-specific security tools (govulncheck, gosec). Secret scanning
+# and dependency/config scanning live in baseline.yml, not here - this
+# file has no opinion about those at all.
+
+on:
+  workflow_call:
+    inputs:
+      go-version-file:
+        description: "Path to go.mod used to pin the Go toolchain."
+        type: string
+        default: "go.mod"
+      build-cmd:
+        description: "Optional extra build-verification command run in the test job. Leave empty to skip - most repos already get build coverage from the a11y/docker layers."
+        type: string
+        default: ""
+      gosec-blocking:
+        description: "Graduate gosec from report-only to blocking."
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: Build verification
+        if: ${{ inputs.build-cmd != '' }}
+        run: ${{ inputs.build-cmd }}
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ inputs.go-version-file }}
+
+      # Call-graph-aware known-vulnerability scan of stdlib + deps.
+      # Deliberately NOT golang/govulncheck-action: its internal setup-go
+      # step silently overrides the go-version-file pin above and can mask
+      # real findings. Installed and run manually so it reuses the
+      # toolchain actions/setup-go just pinned.
+      - name: govulncheck
+        env:
+          # actions/setup-go@v7 sets GOTOOLCHAIN=local, which blocks Go's
+          # normal auto-download of a newer toolchain. govulncheck's own
+          # go.mod can require a newer Go than the repo is pinned to. Pin
+          # this explicitly rather than trusting setup-go's current
+          # default, so a future setup-go major bump can't silently break
+          # this step the way v5->v7 did.
+          GOTOOLCHAIN: auto
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+        # Always blocking - do not add continue-on-error here.
+
+      - name: gosec
+        uses: securego/gosec@v2.29.0
+        with:
+          args: ./...
+        continue-on-error: ${{ !inputs.gosec-blocking }}

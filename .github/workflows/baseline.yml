@@ -1,0 +1,55 @@
+name: Baseline (reusable)
+
+# Language-agnostic scans every consuming repo runs unconditionally:
+# secret scanning + dependency/config scanning. No `language` input here on
+# purpose - if a change to this file ever needs to know what language the
+# repo is, that's a sign the change belongs in a per-language layer
+# instead (see README "Repository layout").
+
+on:
+  workflow_call:
+    inputs:
+      trivy-skip-dirs:
+        description: "Comma-separated paths excluded from the Trivy filesystem/config scan. Use only for documented, accepted-risk exceptions (see README '5. Accepting a finding')."
+        type: string
+        default: ""
+      gitleaks-blocking:
+        description: "Graduate gitleaks from report-only to blocking."
+        type: boolean
+        default: false
+      trivy-fs-blocking:
+        description: "Graduate the Trivy filesystem/config scan from report-only to blocking."
+        type: boolean
+        default: false
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # gitleaks-action lists PR commits via the API - without this it gets
+      # a silent 403 that looks like a clean pass under continue-on-error.
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history so gitleaks can scan past commits
+
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: ${{ !inputs.gitleaks-blocking }}
+
+      - name: Trivy filesystem & config scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          # Must be explicit - the fs default is vuln-only and silently
+          # skips Dockerfile/Terraform/CloudFormation misconfiguration
+          # checks otherwise.
+          scanners: vuln,config
+          severity: CRITICAL,HIGH
+          exit-code: ${{ inputs.trivy-fs-blocking && '1' || '0' }}
+          skip-dirs: ${{ inputs.trivy-skip-dirs }}

@@ -10,23 +10,37 @@ on:
     branches: [main]
 
 jobs:
-  ci:
+  baseline:
     permissions:
       contents: read
       pull-requests: write
-      packages: write
-    uses: chefcai/ci-templates/.github/workflows/standard-ci.yml@main
+    uses: chefcai/ci-templates/.github/workflows/baseline.yml@main
     with:
-      language: go
-      go-version-file: go.mod
-      has-dockerfile: true
-      platforms: linux/amd64,linux/arm64
       trivy-skip-dirs: ""            # comma-separated accepted-risk exceptions, see README
-      gosec-blocking: false          # graduate to true once findings are triaged
       gitleaks-blocking: false       # graduate to true once a clean baseline is confirmed
       trivy-fs-blocking: false       # graduate to true once clean
+
+  go:
+    uses: chefcai/ci-templates/.github/workflows/go.yml@main
+    with:
+      go-version-file: go.mod
+      gosec-blocking: false          # graduate to true once findings are triaged
+
+  docker:
+    needs: [baseline, go]
+    permissions:
+      contents: read
+      packages: write
+    uses: chefcai/ci-templates/.github/workflows/docker.yml@main
+    with:
+      platforms: linux/amd64,linux/arm64
       trivy-image-blocking: false    # graduate to true once clean
-      a11y: true                     # manual opt-in - only for web-facing repos
+
+  a11y:
+    needs: [go]
+    uses: chefcai/ci-templates/.github/workflows/a11y.yml@main
+    with:
+      language: go
       a11y-build-cmd: "go build -o app ./cmd/app"
       a11y-start-cmd: "PORT=8090 ./app &"
       a11y-healthcheck-url: "http://127.0.0.1:8090/healthz"
