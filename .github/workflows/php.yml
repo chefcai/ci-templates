@@ -9,7 +9,18 @@ name: PHP (reusable)
 # surface findings in vendored/upstream code chefcai didn't write. Worth
 # scoping paths or accepting upstream-only findings explicitly once this
 # actually runs against it, rather than guessing the right scope here
-# ahead of time. Unvalidated against a real run - revisit once it is.
+# ahead of time.
+#
+# Validated against chefcai/anamanta-kythings: that repo has no
+# composer.json at all (plain PHP, no dependency manager), so the
+# original unconditional `composer install`/`composer audit` steps would
+# fail immediately with "no composer.json found" rather than reporting
+# anything. Composer-dependent steps (install, test-cmd, audit) now
+# detect composer.json first and skip cleanly if it's absent (same
+# pattern as iac.yml/kotlin.yml's auto-detection), and psalm no longer
+# requires Composer at all - it's installed from its standalone phar
+# release, so SAST coverage works even for a Composer-less repo like
+# anamanta-kythings.
 
 on:
   workflow_call:
@@ -18,7 +29,7 @@ on:
         type: string
         default: "8.3"
       test-cmd:
-        description: "Command that runs the test suite, e.g. `composer test` or `vendor/bin/phpunit`."
+        description: "Command that runs the test suite, e.g. `composer test` or `vendor/bin/phpunit`. Only runs when the repo has a composer.json - a Composer-less repo should test itself in its own workflow instead."
         type: string
         default: "composer test"
       composer-audit-blocking:
@@ -36,8 +47,19 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ inputs.php-version }}
+      - name: Detect composer.json
+        id: detect
+        run: |
+          if [ -f composer.json ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No composer.json found - skipping composer install and test-cmd. This job only covers Composer-managed test suites; a Composer-less repo needs its own test workflow."
+          fi
       - run: composer install --no-progress --prefer-dist
+        if: steps.detect.outputs.found == 'true'
       - run: ${{ inputs.test-cmd }}
+        if: steps.detect.outputs.found == 'true'
 
   security:
     runs-on: ubuntu-latest
@@ -46,12 +68,31 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ inputs.php-version }}
+      - name: Detect composer.json
+        id: detect
+        run: |
+          if [ -f composer.json ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No composer.json found - skipping composer install/audit. Psalm still runs below since it doesn't need Composer."
+          fi
       - run: composer install --no-progress --prefer-dist
+        if: steps.detect.outputs.found == 'true'
       - name: composer audit
+        if: steps.detect.outputs.found == 'true'
         run: composer audit
         continue-on-error: ${{ !inputs.composer-audit-blocking }}
-      - name: psalm (taint analysis)
+      - name: install psalm (phar, no Composer required)
         run: |
-          composer require --dev vimeo/psalm --no-progress
-          vendor/bin/psalm --taint-analysis --no-cache
+          curl -sSL -o psalm.phar "https://github.com/vimeo/psalm/releases/latest/download/psalm.phar"
+          chmod +x psalm.phar
+      - name: psalm config
+        run: |
+          if [ ! -f psalm.xml ] && [ ! -f psalm.xml.dist ]; then
+            echo "No psalm.xml found - generating a default config with 'psalm --init' so taint analysis has something to run against."
+            php psalm.phar --init . 3
+          fi
+      - name: psalm (taint analysis)
+        run: php psalm.phar --taint-analysis --no-cache
         continue-on-error: ${{ !inputs.psalm-blocking }}
