@@ -15,7 +15,13 @@ name: Kotlin/JVM (reusable)
 # there's effectively no known-vuln coverage for this repo shape, which is
 # worth flagging rather than silently assuming Trivy already handles it.
 #
-# Unvalidated against a real run - revisit once it is.
+# Validated against chefcai/launcher: that repo has no detekt Gradle
+# plugin applied, so `./gradlew detekt` fails with "task not found" rather
+# than reporting findings. Rather than assume every onboarded Kotlin repo
+# has detekt configured, the security job now detects whether the task
+# exists first and skips cleanly (same pattern as iac.yml's
+# terraform/cfn-lint auto-detection) - add the detekt Gradle plugin to a
+# repo to get real coverage from this job.
 
 on:
   workflow_call:
@@ -61,6 +67,16 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ inputs.java-version }}
+      - name: Detect detekt task
+        id: detect
+        run: |
+          if ./gradlew tasks --all --console=plain | grep -qE '^detekt( |$)'; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No 'detekt' Gradle task found - skipping. Add the detekt Gradle plugin to this repo to get real coverage from this job."
+          fi
       - name: detekt
+        if: steps.detect.outputs.found == 'true'
         run: ./gradlew detekt
         continue-on-error: ${{ !inputs.detekt-blocking }}
