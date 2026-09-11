@@ -1,0 +1,123 @@
+name: Infrastructure-as-Code (reusable)
+
+# Covers every IaC format checkov understands in one pass - Terraform,
+# CloudFormation, Ansible, OpenAPI/Serverless, Helm, Kubernetes manifests,
+# Dockerfiles, and more - plus the two format-specific correctness checks
+# checkov doesn't do: `terraform fmt`/`validate` and `cfn-lint`.
+#
+# Originally split into terraform.yml + cloudformation.yml, each running
+# its own checkov call. Consolidated into this single file because checkov
+# already auto-detects every framework it supports in one unscoped scan -
+# running it twice (or once per language, as more IaC formats get added)
+# would just be the same scan repeated. Terraform's fmt/validate and
+# CloudFormation's cfn-lint stay as separate jobs because those are
+# format-specific correctness tools checkov doesn't replace, not
+# additional security scanners.
+#
+# checkov/cfn-lint auto-detect their own inputs, so this file needs no
+# `language` input and works unmodified as more frameworks (Ansible,
+# Helm, K8s, OpenAPI, ...) show up in a repo - nothing to add here when
+# that happens.
+#
+# Verified directly (not assumed): cfn-lint errors loudly on any yaml/json
+# lacking a `Resources` key (tried it against a GitHub Actions workflow
+# file and a package.json - both failed with E1001), so CloudFormation
+# files here are auto-detected the same way checkov itself detects them
+# (a top-level `Resources:`/`"Resources"` key) rather than assumed present
+# from a glob. checkov's own JSON/SARIF output was tested as a source for
+# this file list and rejected - both formats only list files that
+# triggered at least one check result, so a valid CFN file using only
+# resource types checkov has no check for would silently vanish from it.
+
+on:
+  workflow_call:
+    inputs:
+      terraform-dir:
+        description: "Directory containing the root Terraform config, if any. Ignored (fmt/validate skipped cleanly) when the repo has no .tf files."
+        type: string
+        default: "."
+      cfn-lint-glob:
+        description: "Optional override glob (bash extglob, relative to repo root) matching CloudFormation templates. Leave unset to auto-detect every yaml/yml/json file with a top-level Resources key."
+        type: string
+        default: ""
+      checkov-blocking:
+        description: "Graduate checkov from report-only to blocking."
+        type: boolean
+        default: false
+      cfn-lint-blocking:
+        description: "Graduate cfn-lint from report-only to blocking."
+        type: boolean
+        default: false
+
+jobs:
+  checkov:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Unscoped: checkov auto-detects Terraform, CloudFormation, Ansible,
+      # OpenAPI/Serverless, Helm, Kubernetes, Dockerfiles, etc. in one pass.
+      # This is on top of, not instead of, baseline.yml's Trivy `config`
+      # scan - checkov's policy set is broader/IaC-specific, Trivy's is the
+      # CIS-benchmark-style baseline every repo already gets for free.
+      - name: checkov
+        uses: bridgecrewio/checkov-action@v12.3123.0
+        with:
+          directory: .
+        continue-on-error: ${{ !inputs.checkov-blocking }}
+
+  terraform-fmt-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Detect Terraform files
+        id: detect
+        run: |
+          if find "${{ inputs.terraform-dir }}" -name '*.tf' -print -quit | grep -q .; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No .tf files found under '${{ inputs.terraform-dir }}' - skipping fmt/validate."
+          fi
+      - uses: hashicorp/setup-terraform@v4
+        if: steps.detect.outputs.found == 'true'
+      - run: terraform fmt -check -recursive
+        if: steps.detect.outputs.found == 'true'
+        working-directory: ${{ inputs.terraform-dir }}
+      - run: terraform init -backend=false
+        if: steps.detect.outputs.found == 'true'
+        working-directory: ${{ inputs.terraform-dir }}
+      - run: terraform validate
+        if: steps.detect.outputs.found == 'true'
+        working-directory: ${{ inputs.terraform-dir }}
+
+  cfn-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+      - run: pip install cfn-lint
+      - name: Detect and lint CloudFormation templates
+        run: |
+          shopt -s globstar nullglob
+          if [ -n "${{ inputs.cfn-lint-glob }}" ]; then
+            files=(${{ inputs.cfn-lint-glob }})
+          else
+            files=()
+            for f in **/*.yaml **/*.yml; do
+              [ -f "$f" ] || continue
+              grep -qE '^Resources:' "$f" 2>/dev/null && files+=("$f")
+            done
+            for f in **/*.json; do
+              [ -f "$f" ] || continue
+              grep -qE '"Resources"[[:space:]]*:' "$f" 2>/dev/null && files+=("$f")
+            done
+          fi
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No CloudFormation templates detected - skipping cfn-lint."
+            exit 0
+          fi
+          echo "Linting: ${files[*]}"
+          cfn-lint "${files[@]}"
+        continue-on-error: ${{ !inputs.cfn-lint-blocking }}

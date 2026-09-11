@@ -19,11 +19,10 @@ job calling one workflow with a `language` input.
 .github/workflows/docker.yml          conditional: build -> scan -> push. No language input.
 .github/workflows/a11y.yml            opt-in: pa11y/Puppeteer. Caller supplies commands, not this file.
 .github/workflows/go.yml              language layer: test (vet+race) + security (govulncheck+gosec)
-.github/workflows/terraform.yml       language layer: fmt/validate + checkov
 .github/workflows/php.yml             language layer: phpunit + composer audit + psalm
 .github/workflows/kotlin.yml          language layer: gradle test/build + detekt
 .github/workflows/bash.yml            language layer: shellcheck (+ optional test-cmd)
-.github/workflows/cloudformation.yml  language layer: cfn-lint
+.github/workflows/iac.yml             IaC layer: checkov (Terraform/CloudFormation/Ansible/OpenAPI/Helm/K8s/...) + terraform fmt/validate + cfn-lint
 ```
 
 A Dockerfile-only repo (nothing but a Dockerfile, no application source)
@@ -111,12 +110,12 @@ never duplicated in a language layer.
 | Language | Status | `test` | Language-specific `security` |
 |---|---|---|---|
 | Go | proven (`anya-qr`) | `go vet` + `go test -race` | `govulncheck` (always blocking — call-graph aware, installed manually, never `golang/govulncheck-action`, see gotcha below) + `gosec` (input-gated blocking) |
-| Terraform | written ahead of need, unvalidated | `terraform fmt -check` + `terraform validate` | `checkov` (input-gated blocking) — Trivy `config` in baseline already covers most misconfiguration, checkov is the deeper policy layer |
 | PHP | written for `anamanta-kythings`, unvalidated | caller-supplied `test-cmd` (default `composer test`) | `composer audit` (known-vuln, free, built into Composer) + `psalm --taint-analysis` (SAST, built into Psalm, no separate plugin needed) |
 | Kotlin/JVM | written for `launcher`, unvalidated | `./gradlew test` + `./gradlew build` (Android SDK setup is opt-in via `is-android`) | `detekt` covers both lint and SAST — no second tool needed the way Go needs gosec alongside `go vet` |
 | Bash | written ahead of need, unvalidated | `shellcheck` (ships preinstalled on GitHub-hosted runners) + optional caller `test-cmd` | none — no known-vuln-scanner equivalent exists for shell scripts; `baseline.yml`'s gitleaks/Trivy already cover secrets and any embedded Dockerfile |
-| CloudFormation | written ahead of need, unvalidated | `cfn-lint` against a caller-supplied `template-glob` (**required**, no safe default — verified `cfn-lint` errors on any yaml/json without a `Resources` key, so it can't scan "everything" the way Trivy can) | none — Trivy `config` in baseline already covers CloudFormation misconfiguration |
 | Dockerfile-only (no app source) | proven pattern, no file needed | n/a | n/a — `baseline.yml` + `docker.yml` alone are the whole pipeline |
+
+`iac.yml` isn't in this table because it isn't gated by a `language` input the way the rows above are — it auto-detects what's present and applies to any repo with infrastructure-as-code files, alongside whichever application-language row also applies. See "3. `iac.yml`" below.
 
 **Known gotcha every language layer must respect:** `actions/setup-go@v7`
 (and presumably future major bumps of other language setup actions)
@@ -134,7 +133,25 @@ confirmed by running it, not assumed) — but none has run against the real
 repo it was written for yet. Treat every unvalidated layer as a draft to
 fix once it actually runs, not a finished implementation.
 
-## 3. `a11y.yml` — opt-in, web-facing repos only
+## 3. `iac.yml` — infrastructure-as-code, auto-detected
+
+Unlike the language layers above, this file takes no `language` input and
+isn't opted into per-repo — it composes into `ci.yml` alongside whichever
+application-language layer applies (or on its own, for an infra-only repo),
+and each of its jobs detects for itself whether there's anything to do.
+
+| Job | Covers | Blocking? | Notes |
+|---|---|---|---|
+| `checkov` | Terraform, CloudFormation, Ansible, OpenAPI/Serverless, Helm, Kubernetes, Dockerfiles, and everything else checkov supports | input `checkov-blocking` (default report-only) | One unscoped scan (`directory: .`) — checkov auto-detects every framework it understands in a single pass, so this isn't duplicated per language the way it briefly was when `terraform.yml` and `cloudformation.yml` were separate files. This is on top of, not instead of, baseline.yml's Trivy `config` scan — checkov's policy set is broader/IaC-specific. |
+| `terraform-fmt-validate` | Terraform correctness | always blocking (fmt/validate are correctness, not security) | Auto-detects `.tf` files under `terraform-dir` (default `.`) and skips cleanly if there are none — safe to include in a repo with no Terraform at all. |
+| `cfn-lint` | CloudFormation correctness | input `cfn-lint-blocking` (default report-only) | Auto-detects template files by checking for a top-level `Resources:`/`"Resources"` key across `**/*.yaml`, `**/*.yml`, `**/*.json` — the same structural check CloudFormation and checkov themselves use to recognize a template. Verified directly (not assumed) that `cfn-lint` errors loudly on any yaml/json lacking that key, so this can't safely default to scanning "everything" the way Trivy can; an optional `cfn-lint-glob` input overrides auto-detection for edge cases. Checkov's own JSON/SARIF output was tested and rejected as a source for this file list — both formats only list files that triggered at least one check result, so a valid CFN file using only resource types checkov has no check for would silently vanish from it. |
+
+Written ahead of need — no repo in this account is primarily
+infrastructure-as-code today. Unvalidated in the same sense as the other
+ahead-of-need layers (see below): checked against real tool behavior where
+verifiable, but not yet run against a real consuming repo.
+
+## 4. `a11y.yml` — opt-in, web-facing repos only
 
 `pa11y` + Puppeteer against a locally built-and-seeded instance of the app
 — not a static file. Both light and dark mode are covered by having your
@@ -161,7 +178,7 @@ that still needs to know what to install):
 `a11y-blocking` (default `false`) graduates it once the initial findings
 backlog is fixed.
 
-## 4. `docker.yml` — conditional, no language input
+## 5. `docker.yml` — conditional, no language input
 
 Never pushes an unscanned image:
 
@@ -181,7 +198,7 @@ TARGETOS TARGETARCH` in the Dockerfile instead of relying on QEMU emulation
 platform. See `anya-qr`'s `Dockerfile` for the pattern; this isn't something
 `docker.yml` itself can enforce, it's a Dockerfile-authoring convention.
 
-## 5. Report-only → blocking graduation process
+## 6. Report-only → blocking graduation process
 
 Every scanner except `govulncheck` (always blocking — it's call-graph-aware
 and any Go finding is real) starts as **report-only**
@@ -209,7 +226,7 @@ issue link whenever you do this. `gosec`'s `#nosec` comments (see
 `anya-qr`#43) are the equivalent pattern for a single line rather than a
 whole path.
 
-## 6. Adding a new language
+## 7. Adding a new language
 
 1. Add a new `.github/workflows/<language>.yml` reusable workflow with its
    own `test` job and, if the language has genuinely language-specific
@@ -233,11 +250,10 @@ whole path.
 .github/workflows/docker.yml          docker-setup/docker-scan/docker-push (conditional, no language input)
 .github/workflows/a11y.yml            pa11y/Puppeteer (opt-in)
 .github/workflows/go.yml              Go language layer
-.github/workflows/terraform.yml       Terraform language layer (unvalidated)
 .github/workflows/php.yml             PHP language layer (unvalidated)
 .github/workflows/kotlin.yml          Kotlin/JVM language layer (unvalidated)
 .github/workflows/bash.yml            Bash language layer (unvalidated)
-.github/workflows/cloudformation.yml  CloudFormation language layer (unvalidated)
+.github/workflows/iac.yml             IaC layer: checkov + terraform fmt/validate + cfn-lint, auto-detected (unvalidated)
 examples/ci.yml.go-minimal.yml        thin wrapper: go, no docker, no a11y
 examples/ci.yml.go-full.yml           thin wrapper: go + docker + a11y (anya-qr's shape)
 examples/dependabot.yml.go-docker     dependabot.yml with gomod + docker + github-actions
