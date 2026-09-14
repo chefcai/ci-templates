@@ -63,6 +63,13 @@ jobs:
           java-version: ${{ inputs.java-version }}
       - if: ${{ inputs.is-android }}
         uses: android-actions/setup-android@v4
+        with:
+          # The action's default package list includes the long-deprecated
+          # 'tools' package. As of the 2026-09 ubuntu-latest image the bundled
+          # cmdline-tools 20.0 no longer offer it, so sdkmanager exits 1 and
+          # the job dies before Gradle runs. platform-tools is all that's
+          # needed here; Gradle fetches platforms/build-tools itself.
+          packages: platform-tools
       - run: ${{ inputs.test-cmd }}
       - run: ${{ inputs.build-cmd }}
       - name: Upload debug APK
