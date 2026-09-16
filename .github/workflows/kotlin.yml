@@ -23,6 +23,16 @@ name: Kotlin/JVM (reusable)
 # terraform/cfn-lint auto-detection) - add the detekt Gradle plugin to a
 # repo to get real coverage from this job.
 #
+# Test reporting: `./gradlew test` only ever surfaced failures as a wall of
+# Gradle output in a collapsed log. The publish step below turns the JUnit XML
+# every Gradle test task already writes into (a) a check run with a pass/fail
+# summary, (b) inline annotations on the failing lines, and (c) a PR comment.
+# That needs `checks: write` and `pull-requests: write` on the CALLING job -
+# a reusable workflow cannot grant itself permissions - so a caller that omits
+# them gets the summary in the job log only, and the step is non-fatal by
+# design (`action_fail: false`): the build result comes from the test task
+# itself, not from the reporter.
+#
 # ci-templates#10: for is-android repos, `build-cmd` (e.g. `assembleDebug`)
 # already produces a sideloadable debug APK on every push/PR - it just sat
 # on the runner unused. Uploading it as a plain workflow artifact means a
@@ -51,6 +61,10 @@ on:
       detekt-blocking:
         type: boolean
         default: false
+      test-report:
+        description: "Publish JUnit results as a check run, inline annotations and a PR comment. Needs checks/pull-requests write on the calling job."
+        type: boolean
+        default: true
 
 jobs:
   test:
@@ -71,6 +85,17 @@ jobs:
           # needed here; Gradle fetches platforms/build-tools itself.
           packages: platform-tools
       - run: ${{ inputs.test-cmd }}
+      - name: Publish test results
+        if: ${{ always() && inputs.test-report }}
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: "**/build/test-results/**/*.xml"
+          check_name: "Test results"
+          comment_mode: always
+          # The test step above already failed the job if anything failed;
+          # a reporting problem should not also fail it.
+          action_fail: false
+          action_fail_on_inconclusive: false
       - run: ${{ inputs.build-cmd }}
       - name: Upload debug APK
         if: ${{ inputs.is-android }}
