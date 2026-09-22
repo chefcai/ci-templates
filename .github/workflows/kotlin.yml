@@ -104,7 +104,7 @@ jobs:
           name: debug-apk
           path: "**/build/outputs/apk/debug/*.apk"
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 3
 
   security:
     runs-on: ubuntu-latest
