@@ -39,6 +39,12 @@ jobs:
         uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # gitleaks-action uploads a SARIF workflow artifact on every run by
+          # default. Findings are already in the job log and job summary, and
+          # in private repos those artifacts eat the account's Actions storage
+          # quota - once it's hit, the upload error fails this step even when
+          # no leaks were found.
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
         continue-on-error: ${{ !inputs.gitleaks-blocking }}
 
       - name: Trivy filesystem & config scan

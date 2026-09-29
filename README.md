@@ -115,6 +115,17 @@ never duplicated in a language layer.
 | Bash | written ahead of need, unvalidated | `shellcheck` (ships preinstalled on GitHub-hosted runners) + optional caller `test-cmd` | none — no known-vuln-scanner equivalent exists for shell scripts; `baseline.yml`'s gitleaks/Trivy already cover secrets and any embedded Dockerfile |
 | Dockerfile-only (no app source) | proven pattern, no file needed | n/a | n/a — `baseline.yml` + `docker.yml` alone are the whole pipeline |
 
+**Artifact storage in private repos:** on GitHub Free, workflow artifacts in
+private repos share a 500 MB allowance metered in GB-hours per month (public
+repos are free). Once it's used up, every `upload-artifact` call fails with
+"Artifact storage quota has been hit" until the month resets. The layers here
+therefore avoid creating artifacts nobody consumes: gitleaks' SARIF upload and
+docker's build-record upload are off, and `kotlin.yml`'s debug-APK upload
+(`upload-apk`, default `auto`) only runs in public repos and is non-fatal.
+Private repos that need downloadable builds should attach them to a GitHub
+Release instead — release assets inherit the repo's visibility (a private
+repo's releases stay private) and don't count against Actions storage.
+
 `iac.yml` isn't in this table because it isn't gated by a `language` input the way the rows above are — it auto-detects what's present and applies to any repo with infrastructure-as-code files, alongside whichever application-language row also applies. See "3. `iac.yml`" below.
 
 **Known gotcha every language layer must respect:** `actions/setup-go@v7`
