@@ -39,6 +39,18 @@ name: Kotlin/JVM (reusable)
 # PR branch can be sideloaded straight from its own CI run, with no tag, no
 # GitHub Release, no version bump - release.yml stays the only path that
 # actually publishes something.
+#
+# Artifact storage quota: on GitHub Free, workflow artifacts in PRIVATE repos
+# share a 500 MB allowance that is metered in GB-hours across the month
+# (public repos are free). An Android debug APK is ~18 MB, so uploading one
+# per push/PR from a busy private repo exhausts the month in about a week,
+# after which every artifact upload fails with "Artifact storage quota has
+# been hit" and takes CI red with it. `upload-apk` therefore defaults to
+# `auto`: upload only when the calling repo is public. Private repos that
+# want sideloadable builds should publish them to a (private) GitHub Release
+# instead - release assets are access-controlled like the repo and do not
+# count against Actions storage. The upload step is also non-fatal, so a
+# storage problem can never fail an otherwise green build.
 
 on:
   workflow_call:
@@ -61,6 +73,10 @@ on:
       detekt-blocking:
         type: boolean
         default: false
+      upload-apk:
+        description: "Upload the debug APK as a workflow artifact (is-android only). `auto` = only when the calling repo is public (private-repo artifacts count against the account's Actions storage quota), `always`, or `never`."
+        type: string
+        default: "auto"
       test-report:
         description: "Publish JUnit results as a check run, inline annotations and a PR comment. Needs checks/pull-requests write on the calling job."
         type: boolean
@@ -98,7 +114,11 @@ jobs:
           action_fail_on_inconclusive: false
       - run: ${{ inputs.build-cmd }}
       - name: Upload debug APK
-        if: ${{ inputs.is-android }}
+        if: >-
+          ${{ inputs.is-android && (inputs.upload-apk == 'always' ||
+          (inputs.upload-apk == 'auto' && !github.event.repository.private)) }}
+        # Never let artifact storage (quota, outage) fail the build itself.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: debug-apk
